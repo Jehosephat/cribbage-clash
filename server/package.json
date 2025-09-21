@@ -10,6 +10,7 @@
     "lint": "eslint \"src/**/*.ts\""
   },
   "dependencies": {
+    "@cribbage-clash/rules": "file:../rules",
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
     "zod": "^3.23.8"

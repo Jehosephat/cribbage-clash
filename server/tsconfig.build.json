@@ -3,11 +3,7 @@
   "compilerOptions": {
     "noEmit": false,
     "declaration": true,
-    "sourceMap": true,
-    "paths": {
-      "@cribbage-clash/rules": ["../rules/dist/index"],
-      "@cribbage-clash/rules/*": ["../rules/dist/*"]
-    }
+    "sourceMap": true
   },
   "references": [{ "path": "../rules" }]
 }

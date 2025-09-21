@@ -1,20 +1,15 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
-import {
+import type {
   ComboEvent,
   GameState,
   GoResolution,
   PlayerId,
   PlayCardOutcome,
-  ResolutionSummary,
-  createInitialState,
-  declareGo,
-  discardToCrib,
-  cutStarter,
-  playCard,
-  resolveRound
+  ResolutionSummary
 } from '@cribbage-clash/rules';
+import * as Rules from '@cribbage-clash/rules';
 import {
   JoinRequest,
   joinRequestSchema,
@@ -50,6 +45,15 @@ interface RoomRegistry {
 }
 
 const rooms = new Map<string, RoomRegistry>();
+
+const {
+  createInitialState,
+  declareGo,
+  discardToCrib,
+  cutStarter,
+  playCard,
+  resolveRound
+} = Rules;
 
 const metrics = {
   roomsCreated: 0,
