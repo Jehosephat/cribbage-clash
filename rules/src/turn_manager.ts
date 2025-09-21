@@ -73,9 +73,9 @@ export class PeggingTurnManager {
     if (this.passed[opponent]) {
       const awardedTo = this.lastPlayerToPlay ?? opponent;
       this.resetVolley(awardedTo);
-      return { awardedTo };
+      return { awardedTo, reset: true };
     }
-    return {};
+    return { reset: false };
   }
 
   resetAfterThirtyOne(): void {

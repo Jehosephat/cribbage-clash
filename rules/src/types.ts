@@ -25,19 +25,29 @@ export interface HitPointTrack {
   p2: number;
 }
 
+export interface PeggingTracker {
+  passed: Record<PlayerId, boolean>;
+  lastPlayedBy: PlayerId | null;
+}
+
 export interface GameState {
   seed: number;
   round: number;
   dealer: PlayerId;
   count: number;
-  pile: Card[];
+  pile: PeggingPileEntry[];
   turn: PlayerId;
   hands: PlayerHands;
   cribOwner: PlayerId;
   crib: Card[];
   starter: Card | null;
+  deck: Card[];
   hp: HitPointTrack;
   shield: HitPointTrack;
+  damageLog: DamageEvent[];
+  comboLog: ComboLogEntry[];
+  initiative: PlayerId | null;
+  pegging: PeggingTracker;
   phase: GamePhase;
 }
 
@@ -59,6 +69,16 @@ export interface ComboEvent {
   kind: ComboKind;
   damage: number;
   length?: number;
+}
+
+export interface ComboLogEntry {
+  player: PlayerId;
+  combos: ComboEvent[];
+  count: number;
+  pile: PeggingPileEntry[];
+  round: number;
+  phase: GamePhase;
+  timestamp: number;
 }
 
 export type DamageSource = 'pegging' | 'resolution' | 'ability' | 'status';
@@ -99,4 +119,21 @@ export interface PeggingPileEntry {
 
 export interface GoResolution {
   awardedTo?: PlayerId;
+  damageEvent?: DamageEvent;
+  reset: boolean;
+}
+
+export interface PlayCardOutcome {
+  player: PlayerId;
+  card: Card;
+  count: number;
+  combos: ComboEvent[];
+  damageEvent?: DamageEvent;
+  reset: boolean;
+}
+
+export interface ResolutionSummary {
+  handResults: Record<PlayerId, ResolutionResult>;
+  cribResult: ResolutionResult | null;
+  damageEvents: DamageEvent[];
 }
