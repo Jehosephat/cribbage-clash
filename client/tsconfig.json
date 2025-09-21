@@ -8,6 +8,6 @@
     "types": ["vite/client"],
     "noEmit": true
   },
-  "include": ["src", "net"],
+  "include": ["src", "net", "ui"],
   "references": [{ "path": "../rules" }]
 }

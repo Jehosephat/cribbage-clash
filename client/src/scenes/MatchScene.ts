@@ -15,6 +15,17 @@ import {
 } from '@cribbage-clash/rules';
 import Phaser from 'phaser';
 import { socketClient } from '../../net/client';
+import CountMeterView from '../../ui/CountMeterView';
+import HandView from '../../ui/HandView';
+import HPBar from '../../ui/HPBar';
+import PileView from '../../ui/PileView';
+import ShieldOverlay from '../../ui/ShieldOverlay';
+import Toast, { ToastKind } from '../../ui/Toast';
+import {
+  getAccessibilitySettings,
+  onAccessibilitySettingsChange
+} from '../settings/accessibility';
+import type { AccessibilitySettings } from '../settings/types';
 
 export interface MatchSceneData {
   mode: 'hotseat' | 'bot' | 'online';
@@ -25,28 +36,6 @@ export interface MatchSceneData {
 }
 
 type MatchMode = MatchSceneData['mode'];
-
-type ToastKind = 'combo' | 'info' | 'error' | 'damage';
-
-interface HudText {
-  hp: Record<PlayerId, Phaser.GameObjects.Text>;
-  shield: Record<PlayerId, Phaser.GameObjects.Text>;
-  count: Phaser.GameObjects.Text;
-  phase: Phaser.GameObjects.Text;
-  turn: Phaser.GameObjects.Text;
-}
-
-interface PendingToast {
-  text: Phaser.GameObjects.Text;
-  timer: Phaser.Tweens.Tween;
-}
-
-const SUIT_SYMBOL: Record<Card['suit'], string> = {
-  hearts: '♥',
-  diamonds: '♦',
-  clubs: '♣',
-  spades: '♠'
-};
 
 function deepClone<T>(value: T): T {
   const clone = (globalThis as typeof globalThis & { structuredClone?: <K>(input: K) => K }).structuredClone;
@@ -71,8 +60,6 @@ export default class MatchScene extends Phaser.Scene {
 
   private playerName?: string;
 
-  private hud!: HudText;
-
   private boardLayer!: Phaser.GameObjects.Container;
 
   private pileLayer!: Phaser.GameObjects.Container;
@@ -83,7 +70,25 @@ export default class MatchScene extends Phaser.Scene {
 
   private statusBanner!: Phaser.GameObjects.Text;
 
-  private pendingToasts: PendingToast[] = [];
+  private turnIndicator!: Phaser.GameObjects.Text;
+
+  private sceneBackground?: Phaser.GameObjects.Rectangle;
+
+  private boardBackground?: Phaser.GameObjects.Rectangle;
+
+  private hpBars!: Record<PlayerId, HPBar>;
+
+  private shieldOverlays!: Record<PlayerId, ShieldOverlay>;
+
+  private countMeter!: CountMeterView;
+
+  private pileView!: PileView;
+
+  private handView!: HandView;
+
+  private toastContainer!: Phaser.GameObjects.Container;
+
+  private activeToasts: Toast[] = [];
 
   private selectedCardIds = new Set<string>();
 
@@ -92,6 +97,14 @@ export default class MatchScene extends Phaser.Scene {
   private discardSeat: PlayerId = 'p1';
 
   private pendingSummary?: ResolutionSummary;
+
+  private accessibility: AccessibilitySettings = getAccessibilitySettings();
+
+  private accessibilityUnsubscribe?: () => void;
+
+  private lastShields: Record<PlayerId, number> = { p1: 0, p2: 0 };
+
+  private maxHp = 61;
 
   init(data: MatchSceneData): void {
     this.mode = data.mode;
@@ -102,22 +115,21 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.cameras.main.setBackgroundColor('#0b1120');
-    this.add.rectangle(0, 0, this.scale.width, this.scale.height, 0x0b1120).setOrigin(0, 0);
+    this.accessibility = getAccessibilitySettings();
+    const backgroundColor = this.accessibility.highContrast ? 0x000000 : 0x0b1120;
+    this.cameras.main.setBackgroundColor(backgroundColor);
+    this.sceneBackground = this.add.rectangle(0, 0, this.scale.width, this.scale.height, backgroundColor).setOrigin(0, 0);
 
     this.boardLayer = this.add.container(0, 0);
     this.pileLayer = this.add.container(0, 0);
     this.handLayer = this.add.container(0, 0);
     this.actionLayer = this.add.container(0, 0);
+    this.toastContainer = this.add.container(0, 0);
+    this.toastContainer.setDepth(1000);
 
     this.createBackground();
-    this.hud = this.createHud();
-    this.statusBanner = this.add.text(this.scale.width / 2, 44, 'Preparing match…', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '22px',
-      color: '#cbd5f5'
-    });
-    this.statusBanner.setOrigin(0.5, 0.5);
+    this.buildHud();
+    this.statusBanner.setText('Preparing match…');
 
     if (this.mode === 'online') {
       this.setupNetworkBindings();
@@ -128,6 +140,17 @@ export default class MatchScene extends Phaser.Scene {
     } else {
       this.setupLocalMatch();
     }
+
+    this.accessibilityUnsubscribe = onAccessibilitySettingsChange((settings) => {
+      this.accessibility = settings;
+      this.applyAccessibilitySettings();
+      if (this.state) {
+        this.renderPile(this.state);
+        this.renderHand(this.state);
+        this.updateHud(this.state);
+        this.updatePhaseControls(this.state);
+      }
+    });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.cleanup());
     this.events.once(Phaser.Scenes.Events.DESTROY, () => this.cleanup());
@@ -170,10 +193,12 @@ export default class MatchScene extends Phaser.Scene {
 
   private handleCombo(outcome: { combos?: ComboEvent[]; damageEvent?: unknown; count?: number }): void {
     if (outcome.combos && outcome.combos.length > 0) {
-      const summary = outcome.combos
-        .map((combo) => (combo.length ? `${combo.kind} x${combo.length}` : combo.kind))
-        .join(', ');
-      this.pushToast('combo', `Combo: ${summary}`);
+      outcome.combos.forEach((combo) => {
+        const message = this.describeComboToast(combo);
+        if (message) {
+          this.pushToast('combo', message);
+        }
+      });
     }
   }
 
@@ -217,74 +242,45 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   private updateHud(state: GameState): void {
-    this.hud.hp.p1.setText(`P1 HP: ${state.hp.p1}`);
-    this.hud.hp.p2.setText(`P2 HP: ${state.hp.p2}`);
-    this.hud.shield.p1.setText(`Shield: ${state.shield.p1}`);
-    this.hud.shield.p2.setText(`Shield: ${state.shield.p2}`);
-    this.hud.count.setText(`Count: ${state.count}`);
-    this.hud.phase.setText(`Phase: ${state.phase}`);
-    this.hud.turn.setText(`Turn: ${state.turn.toUpperCase()}`);
+    this.maxHp = Math.max(this.maxHp, state.hp.p1, state.hp.p2);
+    this.hpBars.p1.setHp(state.hp.p1, this.maxHp);
+    this.hpBars.p2.setHp(state.hp.p2, this.maxHp);
+    this.shieldOverlays.p1.setShield(state.shield.p1, this.lastShields.p1);
+    this.shieldOverlays.p2.setShield(state.shield.p2, this.lastShields.p2);
+    this.lastShields = { p1: state.shield.p1, p2: state.shield.p2 };
+    this.countMeter.setCount(state.count);
+    this.turnIndicator.setText(`Turn: ${state.turn.toUpperCase()}`);
   }
 
   private renderPile(state: GameState): void {
-    this.pileLayer.removeAll(true);
-    const maxVisible = 6;
-    const startX = this.scale.width / 2 - (maxVisible * 70) / 2;
-    const y = this.scale.height / 2 - 30;
-    const recent = state.pile.slice(-maxVisible);
-    recent.forEach((entry, index) => {
-      const container = this.add.container(startX + index * 70, y);
-      const rect = this.add.rectangle(0, 0, 64, 96, 0x1f2937, 0.9);
-      rect.setStrokeStyle(2, 0x38bdf8, 0.8);
-      const text = this.add.text(0, -10, this.formatCard(entry.card), {
-        fontFamily: 'Inter, sans-serif',
-        fontSize: '20px',
-        color: '#f8fafc'
-      });
-      text.setOrigin(0.5, 0.5);
-      const owner = this.add.text(0, 24, entry.player.toUpperCase(), {
-        fontFamily: 'Inter, sans-serif',
-        fontSize: '16px',
-        color: '#94a3b8'
-      });
-      owner.setOrigin(0.5, 0.5);
-      container.add([rect, text, owner]);
-      this.pileLayer.add(container);
-    });
+    this.pileView.setEntries(state.pile);
   }
 
   private renderHand(state: GameState): void {
-    this.handLayer.removeAll(true);
     const seat = this.determineHandSeat(state);
     const hand = state.hands[seat];
-    const totalWidth = hand.length > 0 ? hand.length * 80 : 0;
-    const startX = hand.length > 0 ? this.scale.width / 2 - totalWidth / 2 + 40 : this.scale.width / 2;
-    const y = this.scale.height - 120;
+    const phase: 'discard' | 'pegging' | 'other' =
+      state.phase === 'discard' ? 'discard' : state.phase === 'pegging' ? 'pegging' : 'other';
 
-    hand.forEach((card, index) => {
-      const container = this.add.container(startX + index * 80, y);
-      const isSelected = this.selectedCardIds.has(card.id);
-      const rect = this.add.rectangle(0, 0, 70, 110, isSelected ? 0xf97316 : 0x1f2937, isSelected ? 0.95 : 0.9);
-      rect.setStrokeStyle(2, isSelected ? 0xfb923c : 0x38bdf8, 1);
-      rect.setInteractive({ useHandCursor: true });
-      rect.on('pointerdown', () => this.handleCardInteraction(card));
+    let canAct = this.canAct(seat);
+    if (phase === 'discard') {
+      if (this.mode === 'hotseat') {
+        canAct = canAct && seat === this.discardSeat;
+      }
+      canAct = canAct && state.hands[seat].length > 4;
+    } else if (phase === 'pegging') {
+      canAct = canAct && state.turn === seat;
+    } else {
+      canAct = canAct && seat === (this.mode === 'hotseat' ? seat : this.localSeat);
+    }
 
-      const label = this.add.text(0, -16, this.formatCard(card), {
-        fontFamily: 'Inter, sans-serif',
-        fontSize: '22px',
-        color: '#f8fafc'
-      });
-      label.setOrigin(0.5, 0.5);
-
-      const value = this.add.text(0, 20, `${card.value}`, {
-        fontFamily: 'Inter, sans-serif',
-        fontSize: '18px',
-        color: '#94a3b8'
-      });
-      value.setOrigin(0.5, 0.5);
-
-      container.add([rect, label, value]);
-      this.handLayer.add(container);
+    this.handView.setHand({
+      cards: hand,
+      selectedIds: this.selectedCardIds,
+      playable: (card) => this.cardPlayable(state, seat, card),
+      canAct,
+      phase,
+      settings: this.accessibility
     });
   }
 
@@ -466,43 +462,61 @@ export default class MatchScene extends Phaser.Scene {
   }
 
   private pushToast(kind: ToastKind, message: string): void {
-    const colorMap: Record<ToastKind, string> = {
-      combo: '#22d3ee',
-      info: '#e0f2fe',
-      error: '#f87171',
-      damage: '#fbbf24'
-    };
-    const toast = this.add.text(this.scale.width / 2, 100 + this.pendingToasts.length * 30, message, {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '20px',
-      color: colorMap[kind],
-      backgroundColor: '#020617cc',
-      padding: { x: 12, y: 8 }
+    const toast = new Toast(this, this.scale.width / 2, 0, {
+      kind,
+      message,
+      settings: this.accessibility,
+      duration: kind === 'combo' ? 2600 : 2000
     });
-    toast.setOrigin(0.5, 0.5);
-    const tween = this.tweens.add({
-      targets: toast,
-      alpha: 0,
-      y: toast.y - 20,
-      duration: 1400,
-      delay: 900,
-      onComplete: () => {
-        toast.destroy();
-        this.pendingToasts = this.pendingToasts.filter((entry) => entry.text !== toast);
-      }
+    toast.setData('kind', kind);
+    this.add.existing(toast);
+    this.toastContainer.add(toast);
+    this.activeToasts.push(toast);
+    this.layoutToasts();
+    toast.play(() => {
+      this.activeToasts = this.activeToasts.filter((entry) => entry !== toast);
+      this.layoutToasts();
     });
-    this.pendingToasts.push({ text: toast, timer: tween });
+  }
+
+  private layoutToasts(): void {
+    this.activeToasts.forEach((toast, index) => {
+      toast.setPosition(this.scale.width / 2, 120 + index * 64);
+    });
+  }
+
+  private describeComboToast(combo: ComboEvent): string {
+    const bonus = combo.damage > 0 ? ` +${combo.damage} dmg` : '';
+    switch (combo.kind) {
+      case 'fifteen':
+        return `FIFTEEN!${bonus}`;
+      case 'thirtyone':
+        return `THIRTY-ONE!${bonus}`;
+      case 'pair':
+        return `PAIR!${bonus}`;
+      case 'pair3':
+        return `TRIPLE!${bonus}`;
+      case 'pair4':
+        return `QUAD!${bonus}`;
+      case 'run':
+        return `RUN x${combo.length ?? 0}!${bonus}`;
+      default:
+        return combo.kind.toUpperCase();
+    }
   }
 
   private createControlButton(label: string, handler: () => void): Phaser.GameObjects.Container {
     const container = this.add.container(0, 0);
-    const background = this.add.rectangle(0, 0, 220, 52, 0x2563eb, 0.92);
+    const fillColor = this.accessibility.highContrast ? 0xffffff : 0x2563eb;
+    const strokeColor = this.accessibility.highContrast ? 0xffffff : 0x38bdf8;
+    const background = this.add.rectangle(0, 0, 220, 52, fillColor, this.accessibility.highContrast ? 1 : 0.92);
     background.setOrigin(0.5, 0.5);
-    background.setStrokeStyle(2, 0x38bdf8, 1);
+    background.setStrokeStyle(2, strokeColor, 1);
     const text = this.add.text(0, 0, label, {
       fontFamily: 'Inter, sans-serif',
-      fontSize: '20px',
-      color: '#f8fafc'
+      fontSize: this.getFontSize(20),
+      fontStyle: 'bold',
+      color: this.accessibility.highContrast ? '#000000' : '#f8fafc'
     });
     text.setOrigin(0.5, 0.5);
     background.setInteractive({ useHandCursor: true }).on('pointerdown', () => {
@@ -522,75 +536,134 @@ export default class MatchScene extends Phaser.Scene {
       return;
     }
     background.setData('disabled', !enabled);
-    background.setFillStyle(enabled ? 0x2563eb : 0x1f2937, enabled ? 0.92 : 0.6);
+    const baseFill = this.accessibility.highContrast ? 0xffffff : 0x2563eb;
+    const disabledFill = this.accessibility.highContrast ? 0x4b5563 : 0x1f2937;
+    background.setFillStyle(enabled ? baseFill : disabledFill, enabled ? (this.accessibility.highContrast ? 1 : 0.92) : 0.6);
     button.setAlpha(enabled ? 1 : 0.6);
   }
 
-  private createBackground(): void {
-    const board = this.add.rectangle(this.scale.width / 2, this.scale.height / 2, this.scale.width - 120, this.scale.height - 160, 0x111c31, 0.95);
-    board.setStrokeStyle(4, 0x1d4ed8, 0.8);
-    this.boardLayer.add(board);
+  private applyAccessibilitySettings(): void {
+    const backgroundColor = this.accessibility.highContrast ? 0x000000 : 0x0b1120;
+    this.cameras.main.setBackgroundColor(backgroundColor);
+    this.sceneBackground?.setFillStyle(backgroundColor, 1);
+    const boardFill = this.accessibility.highContrast ? 0x020617 : 0x111c31;
+    const boardStroke = this.accessibility.highContrast ? 0xffffff : 0x1d4ed8;
+    this.boardBackground?.setFillStyle(boardFill, this.accessibility.highContrast ? 0.98 : 0.95);
+    this.boardBackground?.setStrokeStyle(4, boardStroke, this.accessibility.highContrast ? 1 : 0.85);
 
-    const countTrack = this.add.rectangle(this.scale.width / 2, this.scale.height / 2 + 120, 420, 12, 0x1e293b, 0.9);
-    countTrack.setStrokeStyle(2, 0x38bdf8, 0.7);
-    this.boardLayer.add(countTrack);
+    this.statusBanner.setFontSize(this.getFontSize(24));
+    this.statusBanner.setColor(this.accessibility.highContrast ? '#ffffff' : '#cbd5f5');
+    this.turnIndicator.setFontSize(this.getFontSize(20));
+    this.turnIndicator.setColor(this.accessibility.highContrast ? '#e0f2fe' : '#94a3b8');
 
-    const fifteenTick = this.add.rectangle(this.scale.width / 2 - 80, this.scale.height / 2 + 120, 4, 28, 0xfacc15, 1);
-    const thirtyOneTick = this.add.rectangle(this.scale.width / 2 + 140, this.scale.height / 2 + 120, 4, 28, 0xf87171, 1);
-    this.boardLayer.add(fifteenTick);
-    this.boardLayer.add(thirtyOneTick);
+    this.hpBars.p1.applySettings(this.accessibility);
+    this.hpBars.p2.applySettings(this.accessibility);
+    this.shieldOverlays.p1.applySettings(this.accessibility);
+    this.shieldOverlays.p2.applySettings(this.accessibility);
+    this.countMeter.applySettings(this.accessibility);
+    this.pileView.setSettings(this.accessibility);
+    if (this.state) {
+      this.pileView.setEntries(this.state.pile);
+    }
+    this.activeToasts.forEach((toast) => {
+      const toastKind = (toast.getData('kind') as ToastKind) ?? 'info';
+      toast.applySettings(this.accessibility, toastKind);
+    });
   }
 
-  private createHud(): HudText {
-    const hpTextP1 = this.add.text(60, 40, 'P1 HP: 0', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '20px',
-      color: '#38bdf8'
-    });
-    const hpTextP2 = this.add.text(this.scale.width - 200, 40, 'P2 HP: 0', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '20px',
-      color: '#f472b6'
-    });
-    const shieldP1 = this.add.text(60, 66, 'Shield: 0', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '16px',
-      color: '#cbd5f5'
-    });
-    const shieldP2 = this.add.text(this.scale.width - 200, 66, 'Shield: 0', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '16px',
-      color: '#cbd5f5'
-    });
-    const countText = this.add.text(this.scale.width / 2, this.scale.height / 2 + 90, 'Count: 0', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '22px',
-      color: '#f8fafc'
-    });
-    countText.setOrigin(0.5, 0.5);
+  private getFontSize(base: number): number {
+    return Math.round(base * (this.accessibility.largeText ? 1.25 : 1));
+  }
 
-    const phaseText = this.add.text(this.scale.width / 2, this.scale.height / 2 - 180, 'Phase: —', {
-      fontFamily: 'Inter, sans-serif',
-      fontSize: '20px',
-      color: '#cbd5f5'
-    });
-    phaseText.setOrigin(0.5, 0.5);
+  private createBackground(): void {
+    const boardFill = this.accessibility.highContrast ? 0x020617 : 0x111c31;
+    const boardStroke = this.accessibility.highContrast ? 0xffffff : 0x1d4ed8;
+    const board = this.add.rectangle(
+      this.scale.width / 2,
+      this.scale.height / 2,
+      this.scale.width - 120,
+      this.scale.height - 160,
+      boardFill,
+      this.accessibility.highContrast ? 0.98 : 0.95
+    );
+    board.setStrokeStyle(4, boardStroke, this.accessibility.highContrast ? 1 : 0.85);
+    this.boardLayer.add(board);
+    this.boardBackground = board;
+  }
 
-    const turnText = this.add.text(this.scale.width / 2, this.scale.height / 2 - 150, 'Turn: —', {
+  private buildHud(): void {
+    this.statusBanner = this.add.text(this.scale.width / 2, 48, '', {
       fontFamily: 'Inter, sans-serif',
-      fontSize: '24px',
+      fontSize: this.getFontSize(24),
       fontStyle: 'bold',
-      color: '#38bdf8'
+      color: '#cbd5f5'
     });
-    turnText.setOrigin(0.5, 0.5);
+    this.statusBanner.setOrigin(0.5, 0.5);
 
-    return {
-      hp: { p1: hpTextP1, p2: hpTextP2 },
-      shield: { p1: shieldP1, p2: shieldP2 },
-      count: countText,
-      phase: phaseText,
-      turn: turnText
-    };
+    this.turnIndicator = this.add.text(this.scale.width / 2, 82, '', {
+      fontFamily: 'Inter, sans-serif',
+      fontSize: this.getFontSize(20),
+      color: '#94a3b8'
+    });
+    this.turnIndicator.setOrigin(0.5, 0.5);
+    this.turnIndicator.setText('Turn: —');
+
+    const hpBarP1 = new HPBar(this, 140, 110, {
+      width: 260,
+      height: 28,
+      label: 'Player 1',
+      maxHp: this.maxHp,
+      align: 'left',
+      settings: this.accessibility
+    });
+    const hpBarP2 = new HPBar(this, this.scale.width - 140, 110, {
+      width: 260,
+      height: 28,
+      label: 'Player 2',
+      maxHp: this.maxHp,
+      align: 'right',
+      settings: this.accessibility
+    });
+    this.add.existing(hpBarP1);
+    this.add.existing(hpBarP2);
+    this.boardLayer.add([hpBarP1, hpBarP2]);
+    this.hpBars = { p1: hpBarP1, p2: hpBarP2 };
+
+    const shieldP1 = new ShieldOverlay(this, 140, 150, { width: 220, settings: this.accessibility });
+    const shieldP2 = new ShieldOverlay(this, this.scale.width - 140, 150, {
+      width: 220,
+      settings: this.accessibility
+    });
+    this.add.existing(shieldP1);
+    this.add.existing(shieldP2);
+    this.boardLayer.add([shieldP1, shieldP2]);
+    this.shieldOverlays = { p1: shieldP1, p2: shieldP2 };
+
+    const countMeter = new CountMeterView(this, this.scale.width / 2, this.scale.height / 2 + 120, {
+      width: 480,
+      height: 18,
+      settings: this.accessibility
+    });
+    this.add.existing(countMeter);
+    this.boardLayer.add(countMeter);
+    this.countMeter = countMeter;
+
+    const pileView = new PileView(this, this.scale.width / 2, this.scale.height / 2 - 20, {
+      settings: this.accessibility
+    });
+    this.add.existing(pileView);
+    this.pileLayer.add(pileView);
+    this.pileView = pileView;
+
+    const handView = new HandView(this, this.scale.width / 2, this.scale.height - 140, {
+      settings: this.accessibility,
+      onCardSelected: (card) => this.handleCardInteraction(card)
+    });
+    this.add.existing(handView);
+    this.handLayer.add(handView);
+    this.handView = handView;
+
+    this.applyAccessibilitySettings();
   }
 
   private describePhase(state: GameState): string {
@@ -612,28 +685,13 @@ export default class MatchScene extends Phaser.Scene {
     }
   }
 
-  private formatCard(card: Card): string {
-    const rank = this.rankToString(card.rank);
-    const suit = SUIT_SYMBOL[card.suit];
-    return `${rank}${suit}`;
-  }
-
-  private rankToString(rank: number): string {
-    if (rank === 1) return 'A';
-    if (rank === 11) return 'J';
-    if (rank === 12) return 'Q';
-    if (rank === 13) return 'K';
-    return `${rank}`;
-  }
-
   private cleanup(): void {
     this.unsubscribes.forEach((off) => off());
     this.unsubscribes = [];
-    this.pendingToasts.forEach((entry) => {
-      entry.timer.remove();
-      entry.text.destroy();
-    });
-    this.pendingToasts = [];
+    this.accessibilityUnsubscribe?.();
+    this.accessibilityUnsubscribe = undefined;
+    this.activeToasts.forEach((toast) => toast.destroy());
+    this.activeToasts = [];
   }
 
   private returnToMenuWithError(message: string): void {
