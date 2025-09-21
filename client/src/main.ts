@@ -1,7 +1,10 @@
 import { createInitialState } from '@cribbage-clash/rules';
 import Phaser from 'phaser';
-import BootScene from './scenes/BootScene';
-import TitleScene from './scenes/TitleScene';
+import Boot from './scenes/Boot';
+import LobbyScene from './scenes/LobbyScene';
+import MatchScene from './scenes/MatchScene';
+import MenuScene from './scenes/MenuScene';
+import ResultsScene from './scenes/ResultsScene';
 
 const state = createInitialState();
 
@@ -23,7 +26,10 @@ const config: Phaser.Types.Core.GameConfig = {
     antialias: true,
     pixelArt: false
   },
-  scene: [BootScene, TitleScene],
+  scene: [Boot, MenuScene, LobbyScene, MatchScene, ResultsScene],
+  dom: {
+    createContainer: true
+  },
   physics: {
     default: 'arcade',
     arcade: {
