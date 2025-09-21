@@ -1,0 +1,14 @@
+{
+  "name": "cribbage-clash",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server",
+    "rules"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=client && npm run build --workspace=rules && npm run build --workspace=server",
+    "lint": "npm run lint --workspace=client && npm run lint --workspace=server"
+  }
+}
