@@ -106,6 +106,10 @@ export default class MatchScene extends Phaser.Scene {
 
   private maxHp = 61;
 
+  constructor() {
+    super('MatchScene');
+  }
+
   init(data: MatchSceneData): void {
     this.mode = data.mode;
     this.localSeat = data.localSeat ?? data.seat ?? 'p1';
@@ -501,7 +505,7 @@ export default class MatchScene extends Phaser.Scene {
       case 'run':
         return `RUN x${combo.length ?? 0}!${bonus}`;
       default:
-        return combo.kind.toUpperCase();
+        return (combo.kind as string).toUpperCase();
     }
   }
 
